@@ -1,0 +1,7 @@
+/.build/
+/dist/
+/.aethermind/
+/.venv/
+__pycache__/
+*.pyc
+.DS_Store
