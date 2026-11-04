@@ -146,9 +146,12 @@ final class ConversationTests: XCTestCase {
         let initial: JSONValue = .object(["pending": .number(3), "bytes": .number(5000), "ready": .bool(false)])
         store.apply(.object(["revision": .number(1), "compaction": initial]))
         let progress: JSONValue = .object(["pending": .number(2), "bytes": .number(4000), "ready": .bool(false)])
+        let phaseBeforeCompaction = store.livePhase
         store.receive("activity", .object(["revision": .number(2), "phase": .string("compacting"), "compaction": progress]))
         XCTAssertEqual(store.compactionStatus, progress)
-        XCTAssertTrue(store.busy)
+        XCTAssertFalse(store.busy, "compaction is background work and must not mark the session busy")
+        XCTAssertEqual(store.livePhase, phaseBeforeCompaction, "compaction must not surface as a user-visible phase")
+        XCTAssertEqual(store.activityDetail, "")
         store.apply(.object(["revision": .number(1), "compaction": initial]))
         XCTAssertEqual(store.compactionStatus, progress)
         let ready: JSONValue = .object(["pending": .number(0), "bytes": .number(1000), "ready": .bool(true)])

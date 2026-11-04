@@ -98,6 +98,20 @@ struct CompactorDraft: Equatable {
         choice.model = value
         accountModels[selected] = choice
     }
+
+    /// Seed the operator's requested default: a fast non-reasoning model from
+    /// the provider's catalog. Only an absent entry is seeded; an entry the
+    /// operator saved, even one cleared to empty, is left alone.
+    mutating func applyCompactionDefault(inheriting connection: String) {
+        guard self.connection != AccountConnectionOptions.customID else { return }
+        let selected = self.connection.isEmpty ? connection : self.connection
+        guard selected != AccountConnectionOptions.customID, !selected.isEmpty else { return }
+        guard accountModels[selected] == nil else { return }
+        guard let model = ModelCatalog.defaultCompactionModel(for: selected) else { return }
+        var choice = AccountModelDraft()
+        choice.model = model
+        accountModels[selected] = choice
+    }
 }
 
 enum SettingsCompactorDraft {
@@ -291,6 +305,27 @@ struct SettingsFormDraft: Equatable {
         return SettingsSaveRequest(settings: settings, expectedRevision: revision)
     }
 
+    /// Non-blocking: an id the catalog does not know may simply be a model the
+    /// provider shipped after this build. Name the closest match so a typo is
+    /// visible without stopping the save.
+    func modelWarnings() -> [String] {
+        var warnings: [String] = []
+        func check(_ provider: String, _ id: String, _ what: String) {
+            guard provider != AccountConnectionOptions.customID, !provider.isEmpty else { return }
+            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            guard let suggestion = ModelCatalog.suggestion(for: trimmed, in: ModelCatalog.models(for: provider)) else { return }
+            warnings.append("\(what) model \"\(trimmed)\" is not in the known \(provider) catalog. Closest match: \(suggestion).")
+        }
+        if modelConnection != AccountConnectionOptions.customID {
+            check(modelConnection, selectedModel, "Chat")
+        }
+        let compactor = (try? SettingsCompactorDraft.values(in: advancedText)) ?? CompactorDraft()
+        let compactorProvider = compactor.connection.isEmpty ? modelConnection : compactor.connection
+        check(compactorProvider, compactor.selectedModel(inheriting: modelConnection), "Compression")
+        return warnings
+    }
+
     func validateAdvancedForAutonomy() throws {
         let object = try SettingsAdvancedDraft.parseObject(advancedText)
         _ = try SettingsAdvancedDraft.autonomyObject(in: object)
@@ -314,6 +349,7 @@ struct SettingsView: View {
     @State private var accountReports: [AccountReport] = []
     @State private var accountChecks: [String: AccountCheck] = [:]
     @State private var accountChecking: Set<String> = []
+    @State private var autoCheckedProviders: Set<String> = []
     @State private var credentialAuthorizing = false
     @State private var accountAttempts = AccountAttemptGate()
     @State private var accountActionsInFlight = 0
@@ -406,6 +442,10 @@ struct SettingsView: View {
         .task(id: compactorDraft.endpoint) { await refreshCompactorKeyState() }
         .task { _ = await refreshAccounts(quiet: true) }
         .task(id: accountPollKey) { await pollAccounts() }
+        .task(id: form.modelConnection) { await autoCheck(form.modelConnection) }
+        .task(id: compactorDraft.connection.isEmpty ? form.modelConnection : compactorDraft.connection) {
+            await autoCheck(compactorDraft.connection.isEmpty ? form.modelConnection : compactorDraft.connection)
+        }
     }
 
     private var general: some View {
@@ -476,9 +516,12 @@ struct SettingsView: View {
                         }.frame(height: 28)
                     }
                 } else {
-                    AccountModelField(model: $form.selectedModel,
-                                      models: verifiedModels(for: form.modelConnection),
-                                      identifier: "model-name").id(form.modelConnection)
+                    ModelPickerField(model: $form.selectedModel,
+                                     provider: form.modelConnection,
+                                     choices: modelChoices(for: form.modelConnection, saved: form.selectedModel),
+                                     loading: accountChecking.contains(form.modelConnection),
+                                     error: modelError(for: form.modelConnection),
+                                     identifier: "model-name").id(form.modelConnection)
                     if !modelSelectionReady {
                         Text("No model is selected for this account. Chat stays unready until you choose one.")
                             .font(.caption).foregroundStyle(.orange)
@@ -539,16 +582,22 @@ struct SettingsView: View {
 
                 } else if compactorDraft.connection.isEmpty {
                     if form.modelConnection != AccountConnectionOptions.customID {
-                        AccountModelField(model: compactorModel,
-                                          models: verifiedModels(for: form.modelConnection),
-                                          identifier: "compactor-model").id(form.modelConnection)
+                        ModelPickerField(model: compactorModel,
+                                         provider: form.modelConnection,
+                                         choices: modelChoices(for: form.modelConnection, saved: compactorModel.wrappedValue),
+                                         loading: accountChecking.contains(form.modelConnection),
+                                         error: modelError(for: form.modelConnection),
+                                         identifier: "compactor-model").id(form.modelConnection)
                     }
                     Text("The chat account supplies the endpoint and protocol. A model here overrides only the model.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    AccountModelField(model: compactorModel,
-                                      models: verifiedModels(for: compactorDraft.connection),
-                                      identifier: "compactor-model").id(compactorDraft.connection)
+                    ModelPickerField(model: compactorModel,
+                                     provider: compactorDraft.connection,
+                                     choices: modelChoices(for: compactorDraft.connection, saved: compactorModel.wrappedValue),
+                                     loading: accountChecking.contains(compactorDraft.connection),
+                                     error: modelError(for: compactorDraft.connection),
+                                     identifier: "compactor-model").id(compactorDraft.connection)
                     Text("The " + AccountConnectionOptions.label(for: compactorDraft.connection, in: compactorAccountOptions) + " account supplies the endpoint and protocol. Chat settings stay unchanged.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -893,6 +942,11 @@ struct SettingsView: View {
         guard store.settingsLoaded else { notice = "Loading settings"; return }
         let revision = Int(store.snapshot["settings_revision"].numberValue)
         form = SettingsFormDraft.loaded(from: store.snapshot["settings"], revision: revision)
+        var compactor = (try? SettingsCompactorDraft.values(in: form.advancedText)) ?? CompactorDraft()
+        compactor.applyCompactionDefault(inheriting: form.modelConnection)
+        if let text = try? SettingsCompactorDraft.applying(compactor, to: form.advancedText) {
+            form.advancedText = text
+        }
         loadedForm = form
         didLoadForm = true
         staleRevision = false
@@ -918,8 +972,9 @@ struct SettingsView: View {
         do {
             let request = try form.saveRequest()
             let outcome = try await store.saveSettings(request.settings, expectedRevision: request.expectedRevision)
+            let warnings = form.modelWarnings()
             load()
-            notice = outcome.saveNotice
+            notice = warnings.isEmpty ? outcome.saveNotice : outcome.saveNotice + " " + warnings.joined(separator: " ")
         } catch { notice = error.localizedDescription }
     }
 
@@ -1085,6 +1140,25 @@ struct SettingsView: View {
     private func verifiedModels(for provider: String) -> [AccountModel] {
         guard let check = accountChecks[provider] else { return [] }
         return check.models
+    }
+
+    private func modelChoices(for provider: String, saved: String) -> ModelChoices {
+        ModelSelection.rows(provider: provider, saved: saved, fetched: verifiedModels(for: provider))
+    }
+
+    private func modelError(for provider: String) -> String {
+        guard let check = accountChecks[provider], !check.ok else { return "" }
+        return check.summary
+    }
+
+    /// The account check is the bridge call that returns `models`, so the picker
+    /// fills without a manual click.
+    private func autoCheck(_ provider: String) async {
+        guard provider != AccountConnectionOptions.customID, !provider.isEmpty else { return }
+        guard !autoCheckedProviders.contains(provider), !accountChecking.contains(provider) else { return }
+        guard verifiedModels(for: provider).isEmpty else { return }
+        autoCheckedProviders.insert(provider)
+        await checkAccount(provider)
     }
 
     private func accountReport(for provider: String) -> AccountReport? {
