@@ -309,31 +309,3 @@ struct AccountRow: View {
     }
 }
 
-struct AccountModelField: View {
-    @Binding var model: String
-    let models: [AccountModel]
-    let identifier: String
-
-    var body: some View {
-        SettingsTextField("Model", text: $model, identifier: identifier)
-        AccountModelMenu(model: $model, models: models, identifier: identifier)
-    }
-}
-
-struct AccountModelMenu: View {
-    @Binding var model: String
-    let models: [AccountModel]
-    let identifier: String
-
-    var body: some View {
-        if models.isEmpty {
-            Text("Check the account above to list its models.").font(.caption).foregroundStyle(.secondary)
-        } else {
-            Menu("Verified models") {
-                ForEach(models) { item in
-                    Button(item.displayName) { model = item.id }
-                }
-            }.accessibilityIdentifier(identifier + "-verified-models")
-        }
-    }
-}
