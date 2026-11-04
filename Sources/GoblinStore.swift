@@ -466,11 +466,6 @@ final class GoblinStore {
                 activity = livePhase
             case "compacting":
                 compactionStatus = data["compaction"]
-                turnActive = true
-                toolActive = false
-                livePhase = "Compacting conversation"
-                activity = livePhase
-                activityDetail = text
             case "model_start":
                 if !data["turn_id"].stringValue.isEmpty { activeTurnID = data["turn_id"].stringValue }
                 responseID = data["response_id"].stringValue
